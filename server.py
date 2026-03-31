@@ -41,10 +41,14 @@ _DEMO_FIGURES: dict[str, list[str]] = {
 def job_submit(payload: dict) -> str:
     """Submit a new job to the Temporal workflow queue.
 
-    Accepts the Stage 4A experiment payload containing experiments,
-    workspace_name, and base_template. Stores the full experiment specs
-    JSON and returns a unique job_id.
+    Accepts the Stage 4A experiment payload containing:
+    - workspace_name: str
+    - base_template: str
+    - experiments: list of ExperimentSpec objects, each with:
+      - experiment_id, description, is_baseline, feasibility_flag
+      - edits: list of FileEdit objects (namelist_param, sounding_profile, file_replace)
 
+    Stores the full experiment_specs JSON and returns a unique job_id.
     In production, this triggers the Temporal workflow that builds
     the experiment workspace and runs CM1 simulations.
     """
@@ -57,20 +61,19 @@ def job_submit(payload: dict) -> str:
         if exp.get("experiment_id")
     ]
 
-    # Store the full experiment specs JSON — same format as experiment_specs.json
-    experiment_specs = {
-        "workspace_name": payload.get("workspace_name", ""),
-        "base_template": payload.get("base_template", ""),
-        "experiments": payload.get("experiments", []),
-    }
-
+    # Store the full experiment specs JSON — same structure as experiment_specs.json
     _JOBS[job_id] = {
         "job_id": job_id,
         "status": "completed",
-        "experiment_specs": experiment_specs,
+        "experiment_specs": {
+            "workspace_name": payload.get("workspace_name", ""),
+            "base_template": payload.get("base_template", ""),
+            "experiments": payload.get("experiments", []),
+        },
         "experiment_ids": experiment_ids,
     }
     return json.dumps({"job_id": job_id})
+
 
 
 
