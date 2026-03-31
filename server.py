@@ -112,8 +112,11 @@ def job_plot(job_id: str) -> str:
 
 
 @mcp.tool()
-def jobs_list() -> str:
+def jobs_list(filter: str = "all") -> str:
     """List all jobs in the system.
+
+    Args:
+        filter: Optional filter — "all" (default) returns everything.
 
     Returns all submitted jobs with their IDs, status, and payload metadata.
     """
@@ -121,9 +124,10 @@ def jobs_list() -> str:
         {
             "job_id": j["job_id"],
             "status": j["status"],
-            "workspace_name": j["payload"].get("workspace_name", ""),
+            "workspace_name": j["experiment_specs"].get("workspace_name", ""),
             "experiment_ids": j.get("experiment_ids", []),
         }
         for j in _JOBS.values()
     ]
     return json.dumps({"jobs": jobs})
+
