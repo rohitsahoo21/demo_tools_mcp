@@ -1,12 +1,27 @@
-"""Mock MCP server for CM1 experiment status and figure retrieval."""
+"""Mock MCP server for CM1 experiment job management.
+
+Simulates the Temporal-based job management system that Stage 4A and Stage 5
+agents interact with. Implements the same tool spec as the production server:
+- job_submit: accepts experiment payload, returns a job_id
+- job_status: checks if a job is finished
+- job_plot: returns figure URLs for a completed job
+- jobs_list: lists all submitted jobs
+
+Deploy: fastmcp deploy server.py:mcp --name cm1-job-management
+"""
 
 import json
+import uuid
 
 from fastmcp import FastMCP
 
-mcp = FastMCP("cm1-experiment-status")
+mcp = FastMCP("cm1-job-management")
 
-_EXPERIMENT_FIGURES: dict[str, list[str]] = {
+# In-memory job store (resets on server restart)
+_JOBS: dict[str, dict] = {}
+
+# Hardcoded figure URLs per experiment for demo purposes
+_DEMO_FIGURES: dict[str, list[str]] = {
     "EXP_stability_baseline": [
         "https://i.postimg.cc/26k9d2qD/01-wind-intensity-evolution.png",
         "https://i.postimg.cc/sXjHPwBx/02-pressure-evolution.png",
@@ -23,21 +38,92 @@ _EXPERIMENT_FIGURES: dict[str, list[str]] = {
 
 
 @mcp.tool()
-def check_experiment_status(experiment_id: str) -> str:
-    """Check the status of a CM1 experiment by ID.
+def job_submit(payload: dict) -> str:
+    """Submit a new job to the Temporal workflow queue.
 
-    In production, this would query SLURM/job scheduler for real status.
-    For the mock, always returns "completed" for any experiment ID.
+    Accepts the Stage 4A experiment payload containing experiments,
+    workspace_name, and base_template. Stores the full experiment specs
+    JSON and returns a unique job_id.
+
+    In production, this triggers the Temporal workflow that builds
+    the experiment workspace and runs CM1 simulations.
     """
-    return json.dumps({"experiment_id": experiment_id, "status": "completed"})
+    job_id = str(uuid.uuid4())[:8]
+
+    # Extract experiment IDs from payload
+    experiment_ids = [
+        exp.get("experiment_id", "")
+        for exp in payload.get("experiments", [])
+        if exp.get("experiment_id")
+    ]
+
+    # Store the full experiment specs JSON — same format as experiment_specs.json
+    experiment_specs = {
+        "workspace_name": payload.get("workspace_name", ""),
+        "base_template": payload.get("base_template", ""),
+        "experiments": payload.get("experiments", []),
+    }
+
+    _JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "completed",
+        "experiment_specs": experiment_specs,
+        "experiment_ids": experiment_ids,
+    }
+    return json.dumps({"job_id": job_id})
+
 
 
 @mcp.tool()
-def get_experiment_figures(experiment_id: str) -> str:
-    """Retrieve figure URLs for a completed CM1 experiment.
+def job_status(job_id: str) -> str:
+    """Get the status of a specific job by its ID.
 
-    In production, this would query the experiment workspace filesystem or object storage.
-    For the mock, returns hardcoded postimg.cc URLs mapped to known experiment IDs.
+    In production, this queries the Temporal workflow for real status.
+    For the mock, returns "completed" for any submitted job.
     """
-    figures = _EXPERIMENT_FIGURES.get(experiment_id, [])
-    return json.dumps({"experiment_id": experiment_id, "figures": figures})
+    job = _JOBS.get(job_id)
+    if job:
+        return json.dumps({"job_id": job_id, "status": job["status"]})
+    return json.dumps({"job_id": job_id, "status": "completed"})
+
+
+@mcp.tool()
+def job_plot(job_id: str) -> str:
+    """Get figure URLs for a completed job, organized by experiment.
+
+    In production, this reads from the experiment output directory
+    or object storage where CM1 results and analysis plots are saved.
+    For the mock, returns hardcoded demo figure URLs mapped to experiment IDs.
+    """
+    job = _JOBS.get(job_id)
+
+    figures_by_experiment = {}
+    if job:
+        for eid in job.get("experiment_ids", []):
+            figures_by_experiment[eid] = _DEMO_FIGURES.get(eid, [])
+    else:
+        # Fallback: return all demo figures for unknown jobs
+        figures_by_experiment = dict(_DEMO_FIGURES)
+
+    return json.dumps({
+        "job_id": job_id,
+        "figures": figures_by_experiment,
+    })
+
+
+@mcp.tool()
+def jobs_list() -> str:
+    """List all jobs in the system.
+
+    Returns all submitted jobs with their IDs, status, and payload metadata.
+    """
+    jobs = [
+        {
+            "job_id": j["job_id"],
+            "status": j["status"],
+            "workspace_name": j["payload"].get("workspace_name", ""),
+            "experiment_ids": j.get("experiment_ids", []),
+        }
+        for j in _JOBS.values()
+    ]
+    return json.dumps({"jobs": jobs})
