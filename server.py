@@ -92,26 +92,38 @@ def job_status(job_id: str) -> str:
 
 @mcp.tool()
 def job_plot(job_id: str) -> str:
-    """Get figure URLs for a completed job, organized by experiment.
+    """Get figure URLs for a completed job.
 
     In production, this reads from the experiment output directory
     or object storage where CM1 results and analysis plots are saved.
-    For the mock, returns hardcoded demo figure URLs mapped to experiment IDs.
+    For the mock, returns all demo figure URLs for any valid job.
     """
     job = _JOBS.get(job_id)
 
-    figures_by_experiment = {}
     if job:
-        for eid in job.get("experiment_ids", []):
-            figures_by_experiment[eid] = _DEMO_FIGURES.get(eid, [])
+        experiment_ids = job.get("experiment_ids", [])
+        # Distribute demo figures evenly across experiments
+        all_figures = [
+            "https://i.postimg.cc/26k9d2qD/01-wind-intensity-evolution.png",
+            "https://i.postimg.cc/sXjHPwBx/02-pressure-evolution.png",
+            "https://i.postimg.cc/sXjHPwB1/03-rmw-structure-evolution.png",
+            "https://i.postimg.cc/wvq450ty/04-convective-response-proxies.png",
+            "https://i.postimg.cc/cHxk7XKv/05-end-of-run-summary.png",
+            "https://i.postimg.cc/85ZKZMWC/06-energy-vorticity-evolution.png",
+        ]
+        figures_by_experiment = {}
+        for i, eid in enumerate(experiment_ids):
+            start = i * 2
+            end = start + 2
+            figures_by_experiment[eid] = all_figures[start:end] if end <= len(all_figures) else all_figures[start:]
     else:
-        # Fallback: return all demo figures for unknown jobs
-        figures_by_experiment = dict(_DEMO_FIGURES)
+        figures_by_experiment = {}
 
     return json.dumps({
         "job_id": job_id,
         "figures": figures_by_experiment,
     })
+
 
 
 @mcp.tool()
