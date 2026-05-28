@@ -68,8 +68,13 @@ def job_status(job_id: str) -> str:
 
 
 @mcp.tool()
-def job_plot(job_id: str) -> str:
+def job_plot(job_id: str, workspace_name: str = "", user_name: str = "") -> str:
     """Get figure URLs and report for a completed job.
+
+    Args:
+        job_id: The job ID to fetch plots for.
+        workspace_name: Workspace name (used by production server to locate outputs).
+        user_name: User name (used by production server for auth/routing).
 
     In production, this reads from the experiment output directory
     or object storage where Prithvi results are saved.
