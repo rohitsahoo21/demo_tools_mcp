@@ -27,40 +27,41 @@ _REPORT_URL = (
     "b8c531bf7e533b2a8c643e3007abe2857e035275/run_report.md"
 )
 _FIGURE_URLS = [
-    "https://i.postimg.cc/R6dxS4Ph/per-crop-breakdown.png",
-    "https://i.postimg.cc/JHhVtvgL/pipeline-comparison.png",
+    "https://i.postimg.cc/qvcFRLNR/per-crop-breakdown.png",
+    "https://i.postimg.cc/HLph7yMV/pipeline-comparison.png",
 ]
+
+import time
+
+_JOB_DELAY = 60   # seconds the mock job "runs" before completing (0 = instant)
 
 
 @mcp.tool()
 def job_submit(payload: dict) -> str:
-    """Submit a new job to the Temporal workflow queue. ..."""
+    """Submit a job; returns job_id and echoes the config received."""
     job_id = str(uuid.uuid4())[:8]
-
     _JOBS[job_id] = {
         "job_id": job_id,
-        "status": "completed",
+        "started_at": time.time(),          # <-- stamp submit time
         "payload": payload,
         "workspace_name": payload.get("output", {}).get("dir", ""),
     }
     return json.dumps({
         "job_id": job_id,
         "workspace_name": payload.get("output", {}).get("dir", ""),
-        "config_received": payload,   # ground-truth echo of what the server got
+        "config_received": payload,
     })
 
 
 @mcp.tool()
 def job_status(job_id: str) -> str:
-    """Get the status of a specific job by its ID.
-
-    In production, this queries the Temporal workflow for real status.
-    For the mock, returns "completed" for any submitted job.
-    """
+    """Return 'running' until _JOB_DELAY seconds elapse, then 'completed'."""
     job = _JOBS.get(job_id)
-    if job:
-        return json.dumps({"job_id": job_id, "status": job["status"]})
-    return json.dumps({"job_id": job_id, "status": "completed"})
+    if not job:
+        return json.dumps({"job_id": job_id, "status": "completed"})
+    elapsed = time.time() - job.get("started_at", 0)
+    status = "completed" if elapsed >= _JOB_DELAY else "running"
+    return json.dumps({"job_id": job_id, "status": status})
 
 
 @mcp.tool()
