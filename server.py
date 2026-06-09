@@ -34,15 +34,7 @@ _FIGURE_URLS = [
 
 @mcp.tool()
 def job_submit(payload: dict) -> str:
-    """Submit a new job to the Temporal workflow queue.
-
-    Accepts the Stage 4 experiment payload containing the full pipeline
-    config YAML (events, prithvi tasks, output settings, etc.).
-
-    Stores the payload and returns a unique job_id.
-    In production, this triggers the Temporal workflow that runs the
-    Prithvi pipeline on HPC.
-    """
+    """Submit a new job to the Temporal workflow queue. ..."""
     job_id = str(uuid.uuid4())[:8]
 
     _JOBS[job_id] = {
@@ -51,7 +43,11 @@ def job_submit(payload: dict) -> str:
         "payload": payload,
         "workspace_name": payload.get("output", {}).get("dir", ""),
     }
-    return json.dumps({"job_id": job_id})
+    return json.dumps({
+        "job_id": job_id,
+        "workspace_name": payload.get("output", {}).get("dir", ""),
+        "config_received": payload,   # ground-truth echo of what the server got
+    })
 
 
 @mcp.tool()
