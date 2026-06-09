@@ -12,6 +12,10 @@ Deploy: fastmcp deploy server.py:mcp --name prithvi-job-management
 
 import json
 import uuid
+import time
+import base64
+import random
+import requests
 
 from fastmcp import FastMCP
 
@@ -30,8 +34,6 @@ _FIGURE_URLS = [
     "https://i.postimg.cc/qvcFRLNR/per-crop-breakdown.png",
     "https://i.postimg.cc/HLph7yMV/pipeline-comparison.png",
 ]
-
-import time
 
 _JOB_DELAY = 240   # seconds the mock job "runs" before completing (0 = instant)
 
