@@ -107,9 +107,12 @@ def jobs_list(filter: str = "all") -> str:
     return json.dumps({"jobs": jobs})
 
 
-import asyncio
+# ── add to imports ──────────────────────────────────────────────────────
+import time
+import base64
 import random
 
+# ── config + helpers (no storage) ───────────────────────────────────────
 _STATE_BBOX = {
     "IA": ([-96.83, 42.02, -94.89, 43.70], "Iowa"),
     "IL": ([-90.20, 39.80, -88.30, 41.40], "Illinois"),
@@ -123,11 +126,20 @@ _STATE_BBOX = {
     "SD": ([-99.73, 43.30, -96.25, 44.63], "South Dakota"),
 }
 
-_SCREEN_SLEEP = 90  # crank high to test background-task behavior
+_SCREEN_DELAY = 60   # seconds the mock pretends screening takes (adjust to taste)
 
 
-@mcp.tool(task=True)
-async def screen_events(
+def _encode_task(payload: dict) -> str:
+    return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+
+
+def _decode_task(task_id: str) -> dict:
+    return json.loads(base64.urlsafe_b64decode(task_id.encode()))
+
+
+# ── screen_events: starts screening, returns a task_id immediately ──────
+@mcp.tool
+def screen_events(
     hazard_type: str = "flood",
     kept_event_ids: list[str] = [],
     rejected_event_ids: list[str] = [],
@@ -138,19 +150,62 @@ async def screen_events(
     prefer_diverse_states: bool = True,
     max_events: int = 5,
 ) -> str:
-    """Screen and manage a list of flood/burn events for the Prithvi pipeline.
-    The number of events is controlled by ``max_events`` (read from
-    ``events.max_events`` in the config YAML; default 5, max 20).
+    """Start screening flood/burn events for the Prithvi pipeline. Returns a
+    task_id IMMEDIATELY — it does NOT return events on this call. Screening
+    runs in the background (catalog + NOAA discovery + HLS/cropland/crop-date
+    verification) and takes several minutes. Tell the user screening has
+    started and they can ask you to check on it; then call ``check_screening``
+    with the returned task_id when the user asks. ``max_events`` controls the
+    count (default 5, max 20). Filters by region (US state), year_range, bbox,
+    and min cropland %. Supports refinement via kept/rejected_event_ids."""
+    task_id = _encode_task({
+        "t": time.time(),
+        "hazard_type": hazard_type,
+        "region": region,
+        "year_range": year_range or [2017, 2025],
+        "max_events": max(1, min(20, max_events)),
+        "min_cropland_pct": min_cropland_pct,
+    })
+    return json.dumps({
+        "status": "running",
+        "task_id": task_id,
+        "eta_seconds": _SCREEN_DELAY,
+        "message": (
+            f"Screening started (~{max(1, _SCREEN_DELAY // 60)} min). "
+            f"Tell the user it's running and to check back shortly; then call "
+            f"check_screening with this task_id."
+        ),
+    })
 
-    Supports iterative refinement: reject events you don't like and get diverse
-    replacements. Searches the pre-built catalog first; when the catalog is
-    exhausted, discovers new events from the NOAA Storm Events API and verifies
-    HLS satellite imagery with a lightweight clear-sky probe. Filters by region
-    (US state), date range, bbox, cropland %."""
-    await asyncio.sleep(_SCREEN_SLEEP)
 
-    target = max(1, min(20, max_events))
-    lo, hi = (year_range or [2017, 2025])
+# ── check_screening: poll a screening job (stateless, decodes task_id) ──
+@mcp.tool
+def check_screening(task_id: str) -> str:
+    """Poll a screening job started by ``screen_events`` using its task_id.
+    Returns status 'running' (with seconds_remaining) until screening is done,
+    then 'completed' with the 'events' list. Call this only when the user asks
+    to check on screening — do not poll continuously."""
+    try:
+        job = _decode_task(task_id)
+    except Exception:
+        return json.dumps({
+            "status": "unknown",
+            "message": f"Invalid or unknown task_id '{task_id}'.",
+        })
+
+    remaining = _SCREEN_DELAY - (time.time() - job["t"])
+    if remaining > 0:
+        return json.dumps({
+            "status": "running",
+            "seconds_remaining": round(remaining),
+            "message": "Still screening — ask me to check again shortly.",
+        })
+
+    lo, hi = job["year_range"]
+    target = job["max_events"]
+    region = job["region"]
+    hazard_type = job["hazard_type"]
+    rng = random.Random(task_id)   # deterministic per task
 
     if region and region.upper() in _STATE_BBOX:
         states = [region.upper()] * target
@@ -170,10 +225,10 @@ async def screen_events(
             "date_start": f"{yr}-06-20",
             "date_end": f"{yr}-06-30",
             "bbox": bb,
-            "cdl_cropland_pct": round(random.uniform(60, 85), 1),
+            "cdl_cropland_pct": round(rng.uniform(60, 85), 1),
             "event_name": "Flood" if hazard_type == "flood" else "Wildfire",
             "damage_total_usd": None,
-            "n_hls_clean": random.randint(20, 40),
+            "n_hls_clean": rng.randint(20, 40),
             "hls_best_pre_date": f"{yr}-06-18",
             "hls_best_post_date": f"{yr}-06-22",
             "slot_index": i,
@@ -183,15 +238,12 @@ async def screen_events(
             "crop_gap_days": [76, 74],
         })
 
-    out = {
+    return json.dumps({
+        "status": "completed",
+        "task_id": task_id,
         "events": events,
         "slots_filled": len(events),
         "total_candidates": 100,
         "source": "catalog",
-        "message": (
-            f"Screened {len(events)} {hazard_type} event(s) "
-            f"(region={region or 'auto'}, years={lo}-{hi}, "
-            f"min_cropland={min_cropland_pct or 0}%). [MOCK task=True]"
-        ),
-    }
-    return json.dumps(out)
+        "message": f"Screened {len(events)} {hazard_type} event(s). [MOCK]",
+    })
