@@ -105,3 +105,93 @@ def jobs_list(filter: str = "all") -> str:
         for j in _JOBS.values()
     ]
     return json.dumps({"jobs": jobs})
+
+
+import asyncio
+import random
+
+_STATE_BBOX = {
+    "IA": ([-96.83, 42.02, -94.89, 43.70], "Iowa"),
+    "IL": ([-90.20, 39.80, -88.30, 41.40], "Illinois"),
+    "IN": ([-87.20, 39.50, -85.30, 41.00], "Indiana"),
+    "KS": ([-98.50, 38.00, -96.50, 39.50], "Kansas"),
+    "MN": ([-95.50, 43.80, -93.50, 45.40], "Minnesota"),
+    "MO": ([-93.80, 38.50, -91.90, 40.10], "Missouri"),
+    "NE": ([-98.76, 40.06, -95.43, 43.03], "Nebraska"),
+    "ND": ([-98.20, 46.50, -96.30, 48.00], "North Dakota"),
+    "OH": ([-84.20, 39.80, -82.30, 41.30], "Ohio"),
+    "SD": ([-99.73, 43.30, -96.25, 44.63], "South Dakota"),
+}
+
+_SCREEN_SLEEP = 90  # crank high to test background-task behavior
+
+
+@mcp.tool(task=True)
+async def screen_events(
+    hazard_type: str = "flood",
+    kept_event_ids: list[str] = [],
+    rejected_event_ids: list[str] = [],
+    region: str | None = None,
+    year_range: list[int] | None = None,
+    bbox: list[float] | None = None,
+    min_cropland_pct: float | None = None,
+    prefer_diverse_states: bool = True,
+    max_events: int = 5,
+) -> str:
+    """Screen and manage a list of flood/burn events for the Prithvi pipeline.
+    The number of events is controlled by ``max_events`` (read from
+    ``events.max_events`` in the config YAML; default 5, max 20).
+
+    Supports iterative refinement: reject events you don't like and get diverse
+    replacements. Searches the pre-built catalog first; when the catalog is
+    exhausted, discovers new events from the NOAA Storm Events API and verifies
+    HLS satellite imagery with a lightweight clear-sky probe. Filters by region
+    (US state), date range, bbox, cropland %."""
+    await asyncio.sleep(_SCREEN_SLEEP)
+
+    target = max(1, min(20, max_events))
+    lo, hi = (year_range or [2017, 2025])
+
+    if region and region.upper() in _STATE_BBOX:
+        states = [region.upper()] * target
+    else:
+        pool = list(_STATE_BBOX.keys())
+        states = [pool[i % len(pool)] for i in range(target)]
+
+    events = []
+    for i, st in enumerate(states, start=1):
+        bb, full = _STATE_BBOX[st]
+        yr = lo + ((i - 1) % max(1, (hi - lo + 1)))
+        events.append({
+            "event_id": f"NOAA_EP_{100000 + i * 137}",
+            "state": st,
+            "state_name": full,
+            "year": yr,
+            "date_start": f"{yr}-06-20",
+            "date_end": f"{yr}-06-30",
+            "bbox": bb,
+            "cdl_cropland_pct": round(random.uniform(60, 85), 1),
+            "event_name": "Flood" if hazard_type == "flood" else "Wildfire",
+            "damage_total_usd": None,
+            "n_hls_clean": random.randint(20, 40),
+            "hls_best_pre_date": f"{yr}-06-18",
+            "hls_best_post_date": f"{yr}-06-22",
+            "slot_index": i,
+            "crop_dates": [f"{yr}-03-15", f"{yr}-05-30", f"{yr}-08-12"],
+            "crop_clear_pcts": [88.0, 91.0, 85.0],
+            "crop_collections": ["HLSS30", "HLSL30", "HLSS30"],
+            "crop_gap_days": [76, 74],
+        })
+
+    out = {
+        "events": events,
+        "slots_filled": len(events),
+        "total_candidates": 100,
+        "source": "catalog",
+        "message": (
+            f"Screened {len(events)} {hazard_type} event(s) "
+            f"(region={region or 'auto'}, years={lo}-{hi}, "
+            f"min_cropland={min_cropland_pct or 0}%). [MOCK task=True]"
+        ),
+    }
+    return json.dumps(out)
