@@ -243,3 +243,106 @@ def check_screening(task_id: str) -> str:
         "source": "catalog",
         "message": f"Screened {len(events)} {hazard_type} event(s). [MOCK]",
     })
+
+
+# ── add to imports ──────────────────────────────────────────────────────
+import time
+import requests
+
+_NOMINATIM_SEARCH = "https://nominatim.openstreetmap.org/search"
+_NOMINATIM_REVERSE = "https://nominatim.openstreetmap.org/reverse"
+_GEO_HEADERS = {"User-Agent": "prithvi-workshop-agent/1.0"}
+
+_NAME_TO_CODE = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN",
+    "mississippi": "MS", "missouri": "MO", "montana": "MT", "nebraska": "NE",
+    "nevada": "NV", "new hampshire": "NH", "new jersey": "NJ",
+    "new mexico": "NM", "new york": "NY", "north carolina": "NC",
+    "north dakota": "ND", "ohio": "OH", "oklahoma": "OK", "oregon": "OR",
+    "pennsylvania": "PA", "puerto rico": "PR", "rhode island": "RI",
+    "south carolina": "SC", "south dakota": "SD", "tennessee": "TN",
+    "texas": "TX", "utah": "UT", "vermont": "VT", "virginia": "VA",
+    "washington": "WA", "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+}
+
+
+@mcp.tool()
+def geocode(query: str) -> str:
+    """Convert a place name or description to a bounding box
+    [west, south, east, north]. Returns a single bbox when unambiguous,
+    or a candidates list when multiple matches are found."""
+    params = {"q": query, "format": "json", "limit": 5}
+    try:
+        resp = requests.get(_NOMINATIM_SEARCH, params=params,
+                            headers=_GEO_HEADERS, timeout=10)
+        resp.raise_for_status()
+        results = resp.json()
+    except requests.RequestException as e:
+        return json.dumps({"message": f"Geocoding service unavailable: {e}"})
+    finally:
+        time.sleep(1)  # Nominatim: 1 req/sec
+
+    if not results:
+        return json.dumps({
+            "message": f"No results for '{query}'. Try rephrasing or provide coordinates."
+        })
+
+    def _bbox(r):
+        bb = r["boundingbox"]  # [south, north, west, east]
+        return [float(bb[2]), float(bb[0]), float(bb[3]), float(bb[1])]
+
+    if len(results) == 1:
+        return json.dumps({
+            "bbox": _bbox(results[0]),
+            "display_name": results[0]["display_name"],
+            "message": "ok",
+        })
+    return json.dumps({
+        "candidates": [
+            {"display_name": r["display_name"], "bbox": _bbox(r)}
+            for r in results[:3]
+        ],
+        "message": "Multiple matches found. Please choose one.",
+    })
+
+
+@mcp.tool()
+def reverse_geocode(bbox: list[float]) -> str:
+    """Convert a bounding box [west, south, east, north] to a location:
+    US state code, state name, county, and display name. Uses the bbox
+    centroid for the lookup."""
+    west, south, east, north = bbox
+    lat = (south + north) / 2
+    lon = (west + east) / 2
+    params = {"lat": lat, "lon": lon, "format": "json",
+              "zoom": 5, "addressdetails": 1}
+    try:
+        resp = requests.get(_NOMINATIM_REVERSE, params=params,
+                            headers=_GEO_HEADERS, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        return json.dumps({"message": f"Reverse geocoding service unavailable: {e}"})
+    finally:
+        time.sleep(1)
+
+    if "error" in data:
+        return json.dumps({"message": f"No results for centroid ({lat}, {lon})."})
+
+    addr = data.get("address", {})
+    state_name = addr.get("state", "")
+    return json.dumps({
+        "state": _NAME_TO_CODE.get(state_name.lower()),
+        "state_name": state_name or None,
+        "county": addr.get("county") or None,
+        "country": addr.get("country") or None,
+        "display_name": data.get("display_name"),
+        "centroid_lat": round(lat, 4),
+        "centroid_lon": round(lon, 4),
+        "message": "ok",
+    })
