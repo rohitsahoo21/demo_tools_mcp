@@ -33,7 +33,7 @@ _FIGURE_URLS = [
 
 import time
 
-_JOB_DELAY = 60   # seconds the mock job "runs" before completing (0 = instant)
+_JOB_DELAY = 240   # seconds the mock job "runs" before completing (0 = instant)
 
 
 @mcp.tool()
