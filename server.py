@@ -1,11 +1,10 @@
-"""Mock MCP server for Prithvi experiment job management.
+"""Mock MCP server for Prithvi closed-loop demo.
 
-Simulates the Temporal-based job management system that Stage 4 and Stage 5
-agents interact with. Implements the same tool spec as the production server:
-- job_submit: accepts experiment payload, returns a job_id
-- job_status: checks if a job is finished
-- job_plot: returns figure URLs for a completed job
-- jobs_list: lists all submitted jobs
+Serves every tool the Prithvi stages call, in one server:
+  Stage 3: geocode, reverse_geocode
+  Stage 4: screen_events, check_screening, job_submit
+  Stage 5: job_status, job_plot
+  (+ jobs_list)
 
 Deploy: fastmcp deploy server.py:mcp --name prithvi-job-management
 """
@@ -14,17 +13,20 @@ import json
 import uuid
 import time
 import base64
-import random
-import requests
 
+import requests
 from fastmcp import FastMCP
 
 mcp = FastMCP("prithvi-job-management")
 
-# In-memory job store (resets on server restart)
+# ── demo timing (low = fast demo) ───────────────────────────────────────
+_JOB_DELAY = 5      # seconds a submitted job "runs" before job_status = completed
+_SCREEN_DELAY = 5   # seconds screening "runs" before check_screening returns events
+
+# ── in-memory job store (resets on restart) ─────────────────────────────
 _JOBS: dict[str, dict] = {}
 
-# Demo result assets
+# ── demo result assets ──────────────────────────────────────────────────
 _REPORT_URL = (
     "https://gist.githubusercontent.com/rohitsahoo21/"
     "891147be5e172f27583d4d5655669e8b/raw/"
@@ -35,99 +37,59 @@ _FIGURE_URLS = [
     "https://i.postimg.cc/HLph7yMV/pipeline-comparison.png",
 ]
 
-_JOB_DELAY = 240   # seconds the mock job "runs" before completing (0 = instant)
+# ── the 8 real RQ2 events returned by screening ─────────────────────────
+_RQ2_EVENTS = [
+    {"event_id": "NOAA_EP_129415", "state": "WI", "state_name": "Wisconsin", "year": 2018,
+     "date_start": "2018-08-22", "date_end": "2018-08-22", "bbox": [-90.1278, 42.3532, -89.1666, 43.4052],
+     "cdl_cropland_pct": 68.0, "event_name": "Flood", "damage_total_usd": None, "n_hls_clean": 32,
+     "hls_best_pre_date": "2018-06-05", "hls_best_post_date": "2018-08-22", "slot_index": 1,
+     "crop_dates": ["2018-03-15", "2018-04-24", "2018-06-05"], "crop_clear_pcts": [88.0, 91.0, 85.0],
+     "crop_collections": ["HLSS30", "HLSL30", "HLSS30"], "crop_gap_days": [40, 42]},
+    {"event_id": "NOAA_EP_203833", "state": "IL", "state_name": "Illinois", "year": 2025,
+     "date_start": "2025-07-23", "date_end": "2025-07-23", "bbox": [-89.4353, 41.5155, -87.7149, 42.3523],
+     "cdl_cropland_pct": 74.0, "event_name": "Flood", "damage_total_usd": None, "n_hls_clean": 35,
+     "hls_best_pre_date": "2025-04-06", "hls_best_post_date": "2025-07-23", "slot_index": 2,
+     "crop_dates": ["2025-01-09", "2025-02-25", "2025-04-06"], "crop_clear_pcts": [86.0, 90.0, 88.0],
+     "crop_collections": ["HLSS30", "HLSL30", "HLSS30"], "crop_gap_days": [47, 40]},
+    {"event_id": "NOAA_EP_158305", "state": "IN", "state_name": "Indiana", "year": 2021,
+     "date_start": "2021-06-16", "date_end": "2021-06-16", "bbox": [-87.6589, 38.7129, -85.2288, 40.2622],
+     "cdl_cropland_pct": 71.0, "event_name": "Flood", "damage_total_usd": None, "n_hls_clean": 30,
+     "hls_best_pre_date": "2021-04-12", "hls_best_post_date": "2021-06-16", "slot_index": 3,
+     "crop_dates": ["2021-01-12", "2021-03-03", "2021-04-12"], "crop_clear_pcts": [85.0, 89.0, 87.0],
+     "crop_collections": ["HLSS30", "HLSL30", "HLSS30"], "crop_gap_days": [50, 40]},
+    {"event_id": "NOAA_EP_172019", "state": "IL", "state_name": "Illinois", "year": 2022,
+     "date_start": "2022-07-24", "date_end": "2022-07-24", "bbox": [-90.4567, 38.106, -89.4387, 39.2971],
+     "cdl_cropland_pct": 77.0, "event_name": "Flood", "damage_total_usd": None, "n_hls_clean": 36,
+     "hls_best_pre_date": "2022-03-26", "hls_best_post_date": "2022-07-24", "slot_index": 4,
+     "crop_dates": ["2022-01-05", "2022-02-14", "2022-03-26"], "crop_clear_pcts": [84.0, 88.0, 90.0],
+     "crop_collections": ["HLSS30", "HLSL30", "HLSS30"], "crop_gap_days": [40, 40]},
+    {"event_id": "NOAA_EP_141424", "state": "ND", "state_name": "North Dakota", "year": 2019,
+     "date_start": "2019-09-22", "date_end": "2019-09-22", "bbox": [-99.7912, 47.1947, -96.9759, 49.1023],
+     "cdl_cropland_pct": 62.0, "event_name": "Flood", "damage_total_usd": None, "n_hls_clean": 28,
+     "hls_best_pre_date": "2019-07-15", "hls_best_post_date": "2019-09-22", "slot_index": 5,
+     "crop_dates": ["2019-04-26", "2019-06-05", "2019-07-15"], "crop_clear_pcts": [83.0, 87.0, 86.0],
+     "crop_collections": ["HLSS30", "HLSL30", "HLSS30"], "crop_gap_days": [40, 40]},
+    {"event_id": "NOAA_EP_184328", "state": "IL", "state_name": "Illinois", "year": 2023,
+     "date_start": "2023-07-04", "date_end": "2023-07-04", "bbox": [-88.2399, 41.501, -87.483, 42.2749],
+     "cdl_cropland_pct": 75.0, "event_name": "Flood", "damage_total_usd": None, "n_hls_clean": 34,
+     "hls_best_pre_date": "2023-04-09", "hls_best_post_date": "2023-07-04", "slot_index": 6,
+     "crop_dates": ["2023-01-10", "2023-02-19", "2023-04-09"], "crop_clear_pcts": [85.0, 89.0, 88.0],
+     "crop_collections": ["HLSS30", "HLSL30", "HLSS30"], "crop_gap_days": [40, 49]},
+    {"event_id": "SD_SIOUX_2024", "state": "SD", "state_name": "South Dakota", "year": 2024,
+     "date_start": "2024-06-24", "date_end": "2024-06-24", "bbox": [-97.15, 42.5, -96.41, 43.14],
+     "cdl_cropland_pct": 66.0, "event_name": "Flood", "damage_total_usd": None, "n_hls_clean": 31,
+     "hls_best_pre_date": "2024-06-16", "hls_best_post_date": "2024-06-24", "slot_index": 7,
+     "crop_dates": ["2024-02-11", "2024-04-13", "2024-06-16"], "crop_clear_pcts": [84.0, 88.0, 90.0],
+     "crop_collections": ["HLSS30", "HLSL30", "HLSS30"], "crop_gap_days": [62, 64]},
+    {"event_id": "SPAIN_VALENCIA_2024", "state": "Valencia", "state_name": "Valencia (Spain)", "year": 2024,
+     "date_start": "2024-10-30", "date_end": "2024-10-30", "bbox": [-0.45, 39.15, -0.32, 39.47],
+     "cdl_cropland_pct": None, "event_name": "Flood (DANA)", "damage_total_usd": None, "n_hls_clean": 33,
+     "hls_best_pre_date": "2024-08-10", "hls_best_post_date": "2024-10-30", "slot_index": 8,
+     "crop_dates": ["2024-03-05", "2024-05-30", "2024-08-10"], "crop_clear_pcts": [86.0, 89.0, 87.0],
+     "crop_collections": ["HLSS30", "HLSL30", "HLSS30"], "crop_gap_days": [86, 72]},
+]
 
-
-@mcp.tool()
-def job_submit(payload: dict) -> str:
-    """Submit a job; returns job_id and echoes the config received."""
-    job_id = str(uuid.uuid4())[:8]
-    _JOBS[job_id] = {
-        "job_id": job_id,
-        "started_at": time.time(),          # <-- stamp submit time
-        "payload": payload,
-        "workspace_name": payload.get("output", {}).get("dir", ""),
-    }
-    return json.dumps({
-        "job_id": job_id,
-        "workspace_name": payload.get("output", {}).get("dir", ""),
-        "config_received": payload,
-    })
-
-
-@mcp.tool()
-def job_status(job_id: str) -> str:
-    """Return 'running' until _JOB_DELAY seconds elapse, then 'completed'."""
-    job = _JOBS.get(job_id)
-    if not job:
-        return json.dumps({"job_id": job_id, "status": "completed"})
-    elapsed = time.time() - job.get("started_at", 0)
-    status = "completed" if elapsed >= _JOB_DELAY else "running"
-    return json.dumps({"job_id": job_id, "status": status})
-
-
-@mcp.tool()
-def job_plot(job_id: str, workspace_name: str = "", user_name: str = "") -> str:
-    """Get figure URLs and report for a completed job.
-
-    Args:
-        job_id: The job ID to fetch plots for.
-        workspace_name: Workspace name (used by production server to locate outputs).
-        user_name: User name (used by production server for auth/routing).
-
-    In production, this reads from the experiment output directory
-    or object storage where Prithvi results are saved.
-    For the mock, returns demo figure URLs and a report link.
-    """
-    return json.dumps({
-        "job_id": job_id,
-        "report_url": _REPORT_URL,
-        "figures": _FIGURE_URLS,
-    })
-
-
-@mcp.tool()
-def jobs_list(filter: str = "all") -> str:
-    """List all jobs in the system.
-
-    Args:
-        filter: Optional filter — "all" (default) returns everything.
-
-    Returns all submitted jobs with their IDs, status, and metadata.
-    """
-    jobs = [
-        {
-            "job_id": j["job_id"],
-            "status": j["status"],
-            "workspace_name": j.get("workspace_name", ""),
-        }
-        for j in _JOBS.values()
-    ]
-    return json.dumps({"jobs": jobs})
-
-
-# ── add to imports ──────────────────────────────────────────────────────
-import time
-import base64
-import random
-
-# ── config + helpers (no storage) ───────────────────────────────────────
-_STATE_BBOX = {
-    "IA": ([-96.83, 42.02, -94.89, 43.70], "Iowa"),
-    "IL": ([-90.20, 39.80, -88.30, 41.40], "Illinois"),
-    "IN": ([-87.20, 39.50, -85.30, 41.00], "Indiana"),
-    "KS": ([-98.50, 38.00, -96.50, 39.50], "Kansas"),
-    "MN": ([-95.50, 43.80, -93.50, 45.40], "Minnesota"),
-    "MO": ([-93.80, 38.50, -91.90, 40.10], "Missouri"),
-    "NE": ([-98.76, 40.06, -95.43, 43.03], "Nebraska"),
-    "ND": ([-98.20, 46.50, -96.30, 48.00], "North Dakota"),
-    "OH": ([-84.20, 39.80, -82.30, 41.30], "Ohio"),
-    "SD": ([-99.73, 43.30, -96.25, 44.63], "South Dakota"),
-}
-
-_SCREEN_DELAY = 60   # seconds the mock pretends screening takes (adjust to taste)
-
-
+# ── task helpers for async screening ────────────────────────────────────
 def _encode_task(payload: dict) -> str:
     return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
 
@@ -136,126 +98,10 @@ def _decode_task(task_id: str) -> dict:
     return json.loads(base64.urlsafe_b64decode(task_id.encode()))
 
 
-# ── screen_events: starts screening, returns a task_id immediately ──────
-@mcp.tool
-def screen_events(
-    hazard_type: str = "flood",
-    kept_event_ids: list[str] = [],
-    rejected_event_ids: list[str] = [],
-    region: str | None = None,
-    year_range: list[int] | None = None,
-    bbox: list[float] | None = None,
-    min_cropland_pct: float | None = None,
-    prefer_diverse_states: bool = True,
-    max_events: int = 5,
-) -> str:
-    """Start screening flood/burn events for the Prithvi pipeline. Returns a
-    task_id IMMEDIATELY — it does NOT return events on this call. Screening
-    runs in the background (catalog + NOAA discovery + HLS/cropland/crop-date
-    verification) and takes several minutes. Tell the user screening has
-    started and they can ask you to check on it; then call ``check_screening``
-    with the returned task_id when the user asks. ``max_events`` controls the
-    count (default 5, max 20). Filters by region (US state), year_range, bbox,
-    and min cropland %. Supports refinement via kept/rejected_event_ids."""
-    task_id = _encode_task({
-        "t": time.time(),
-        "hazard_type": hazard_type,
-        "region": region,
-        "year_range": year_range or [2017, 2025],
-        "max_events": max(1, min(20, max_events)),
-        "min_cropland_pct": min_cropland_pct,
-    })
-    return json.dumps({
-        "status": "running",
-        "task_id": task_id,
-        "eta_seconds": _SCREEN_DELAY,
-        "message": (
-            f"Screening started (~{max(1, _SCREEN_DELAY // 60)} min). "
-            f"Tell the user it's running and to check back shortly; then call "
-            f"check_screening with this task_id."
-        ),
-    })
-
-
-# ── check_screening: poll a screening job (stateless, decodes task_id) ──
-@mcp.tool
-def check_screening(task_id: str) -> str:
-    """Poll a screening job started by ``screen_events`` using its task_id.
-    Returns status 'running' (with seconds_remaining) until screening is done,
-    then 'completed' with the 'events' list. Call this only when the user asks
-    to check on screening — do not poll continuously."""
-    try:
-        job = _decode_task(task_id)
-    except Exception:
-        return json.dumps({
-            "status": "unknown",
-            "message": f"Invalid or unknown task_id '{task_id}'.",
-        })
-
-    remaining = _SCREEN_DELAY - (time.time() - job["t"])
-    if remaining > 0:
-        return json.dumps({
-            "status": "running",
-            "seconds_remaining": round(remaining),
-            "message": "Still screening — ask me to check again shortly.",
-        })
-
-    lo, hi = job["year_range"]
-    target = job["max_events"]
-    region = job["region"]
-    hazard_type = job["hazard_type"]
-    rng = random.Random(task_id)   # deterministic per task
-
-    if region and region.upper() in _STATE_BBOX:
-        states = [region.upper()] * target
-    else:
-        pool = list(_STATE_BBOX.keys())
-        states = [pool[i % len(pool)] for i in range(target)]
-
-    events = []
-    for i, st in enumerate(states, start=1):
-        bb, full = _STATE_BBOX[st]
-        yr = lo + ((i - 1) % max(1, (hi - lo + 1)))
-        events.append({
-            "event_id": f"NOAA_EP_{100000 + i * 137}",
-            "state": st,
-            "state_name": full,
-            "year": yr,
-            "date_start": f"{yr}-06-20",
-            "date_end": f"{yr}-06-30",
-            "bbox": bb,
-            "cdl_cropland_pct": round(rng.uniform(60, 85), 1),
-            "event_name": "Flood" if hazard_type == "flood" else "Wildfire",
-            "damage_total_usd": None,
-            "n_hls_clean": rng.randint(20, 40),
-            "hls_best_pre_date": f"{yr}-06-18",
-            "hls_best_post_date": f"{yr}-06-22",
-            "slot_index": i,
-            "crop_dates": [f"{yr}-03-15", f"{yr}-05-30", f"{yr}-08-12"],
-            "crop_clear_pcts": [88.0, 91.0, 85.0],
-            "crop_collections": ["HLSS30", "HLSL30", "HLSS30"],
-            "crop_gap_days": [76, 74],
-        })
-
-    return json.dumps({
-        "status": "completed",
-        "task_id": task_id,
-        "events": events,
-        "slots_filled": len(events),
-        "total_candidates": 100,
-        "source": "catalog",
-        "message": f"Screened {len(events)} {hazard_type} event(s). [MOCK]",
-    })
-
-
-# ── add to imports ──────────────────────────────────────────────────────
-import time
-import requests
-
+# ── geocoding (Stage 3) ─────────────────────────────────────────────────
 _NOMINATIM_SEARCH = "https://nominatim.openstreetmap.org/search"
 _NOMINATIM_REVERSE = "https://nominatim.openstreetmap.org/reverse"
 _GEO_HEADERS = {"User-Agent": "prithvi-workshop-agent/1.0"}
-
 _NAME_TO_CODE = {
     "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
     "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
@@ -274,59 +120,149 @@ _NAME_TO_CODE = {
 }
 
 
+# ── Stage 4: screening ──────────────────────────────────────────────────
+@mcp.tool()
+def screen_events(
+    hazard_type: str = "flood",
+    kept_event_ids: list[str] = [],
+    rejected_event_ids: list[str] = [],
+    region: str | None = None,
+    year_range: list[int] | None = None,
+    bbox: list[float] | None = None,
+    min_cropland_pct: float | None = None,
+    prefer_diverse_states: bool = True,
+    max_events: int = 8,
+) -> str:
+    """Start screening flood/burn events. Returns a task_id IMMEDIATELY (no
+    events on this call). Tell the user screening has started and to check
+    back; then call check_screening with the task_id."""
+    task_id = _encode_task({"t": time.time(), "max_events": max(1, min(20, max_events))})
+    return json.dumps({
+        "status": "running",
+        "task_id": task_id,
+        "eta_seconds": _SCREEN_DELAY,
+        "message": "Screening started — tell the user it's running, then call check_screening with this task_id.",
+    })
+
+
+@mcp.tool()
+def check_screening(task_id: str) -> str:
+    """Poll a screening job started by screen_events. Returns 'running' until
+    done, then 'completed' with the 'events' list."""
+    try:
+        job = _decode_task(task_id)
+    except Exception:
+        return json.dumps({"status": "unknown", "message": f"Invalid task_id '{task_id}'."})
+
+    remaining = _SCREEN_DELAY - (time.time() - job["t"])
+    if remaining > 0:
+        return json.dumps({"status": "running", "seconds_remaining": round(remaining),
+                           "message": "Still screening — check again shortly."})
+
+    target = job.get("max_events", 8)
+    events = _RQ2_EVENTS[:target] if target and target < len(_RQ2_EVENTS) else _RQ2_EVENTS
+    return json.dumps({
+        "status": "completed",
+        "task_id": task_id,
+        "events": events,
+        "slots_filled": len(events),
+        "total_candidates": len(_RQ2_EVENTS),
+        "source": "catalog",
+        "message": f"Screened {len(events)} flood event(s): 7 CONUS + 1 Spain (Valencia). [MOCK]",
+    })
+
+
+@mcp.tool()
+def job_submit(payload: dict) -> str:
+    """Submit a job; returns job_id and echoes the config received."""
+    job_id = str(uuid.uuid4())[:8]
+    _JOBS[job_id] = {
+        "job_id": job_id,
+        "started_at": time.time(),
+        "payload": payload,
+        "workspace_name": payload.get("output", {}).get("dir", ""),
+    }
+    return json.dumps({
+        "job_id": job_id,
+        "workspace_name": payload.get("output", {}).get("dir", ""),
+        "config_received": payload,
+    })
+
+
+# ── Stage 5: status + plots ─────────────────────────────────────────────
+@mcp.tool()
+def job_status(job_id: str) -> str:
+    """Return 'running' until _JOB_DELAY seconds elapse, then 'completed'."""
+    job = _JOBS.get(job_id)
+    if not job:
+        return json.dumps({"job_id": job_id, "status": "completed"})
+    elapsed = time.time() - job.get("started_at", 0)
+    status = "completed" if elapsed >= _JOB_DELAY else "running"
+    return json.dumps({"job_id": job_id, "status": status})
+
+
+@mcp.tool()
+def job_plot(job_id: str, workspace_name: str = "", user_name: str = "") -> str:
+    """Get figure URLs and report for a completed job."""
+    return json.dumps({
+        "job_id": job_id,
+        "report_url": _REPORT_URL,
+        "figures": _FIGURE_URLS,
+    })
+
+
+@mcp.tool()
+def jobs_list(filter: str = "all") -> str:
+    """List all submitted jobs with computed status."""
+    jobs = []
+    for j in _JOBS.values():
+        elapsed = time.time() - j.get("started_at", 0)
+        jobs.append({
+            "job_id": j["job_id"],
+            "status": "completed" if elapsed >= _JOB_DELAY else "running",
+            "workspace_name": j.get("workspace_name", ""),
+        })
+    return json.dumps({"jobs": jobs})
+
+
+# ── Stage 3: geocoding ──────────────────────────────────────────────────
 @mcp.tool()
 def geocode(query: str) -> str:
-    """Convert a place name or description to a bounding box
-    [west, south, east, north]. Returns a single bbox when unambiguous,
-    or a candidates list when multiple matches are found."""
+    """Convert a place name to a bbox [west, south, east, north]."""
     params = {"q": query, "format": "json", "limit": 5}
     try:
-        resp = requests.get(_NOMINATIM_SEARCH, params=params,
-                            headers=_GEO_HEADERS, timeout=10)
+        resp = requests.get(_NOMINATIM_SEARCH, params=params, headers=_GEO_HEADERS, timeout=10)
         resp.raise_for_status()
         results = resp.json()
     except requests.RequestException as e:
         return json.dumps({"message": f"Geocoding service unavailable: {e}"})
     finally:
-        time.sleep(1)  # Nominatim: 1 req/sec
+        time.sleep(1)
 
     if not results:
-        return json.dumps({
-            "message": f"No results for '{query}'. Try rephrasing or provide coordinates."
-        })
+        return json.dumps({"message": f"No results for '{query}'."})
 
     def _bbox(r):
         bb = r["boundingbox"]  # [south, north, west, east]
         return [float(bb[2]), float(bb[0]), float(bb[3]), float(bb[1])]
 
     if len(results) == 1:
-        return json.dumps({
-            "bbox": _bbox(results[0]),
-            "display_name": results[0]["display_name"],
-            "message": "ok",
-        })
+        return json.dumps({"bbox": _bbox(results[0]),
+                           "display_name": results[0]["display_name"], "message": "ok"})
     return json.dumps({
-        "candidates": [
-            {"display_name": r["display_name"], "bbox": _bbox(r)}
-            for r in results[:3]
-        ],
+        "candidates": [{"display_name": r["display_name"], "bbox": _bbox(r)} for r in results[:3]],
         "message": "Multiple matches found. Please choose one.",
     })
 
 
 @mcp.tool()
 def reverse_geocode(bbox: list[float]) -> str:
-    """Convert a bounding box [west, south, east, north] to a location:
-    US state code, state name, county, and display name. Uses the bbox
-    centroid for the lookup."""
+    """Convert a bbox [west, south, east, north] to US state/county/location."""
     west, south, east, north = bbox
-    lat = (south + north) / 2
-    lon = (west + east) / 2
-    params = {"lat": lat, "lon": lon, "format": "json",
-              "zoom": 5, "addressdetails": 1}
+    lat, lon = (south + north) / 2, (west + east) / 2
+    params = {"lat": lat, "lon": lon, "format": "json", "zoom": 5, "addressdetails": 1}
     try:
-        resp = requests.get(_NOMINATIM_REVERSE, params=params,
-                            headers=_GEO_HEADERS, timeout=10)
+        resp = requests.get(_NOMINATIM_REVERSE, params=params, headers=_GEO_HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException as e:
@@ -345,7 +281,6 @@ def reverse_geocode(bbox: list[float]) -> str:
         "county": addr.get("county") or None,
         "country": addr.get("country") or None,
         "display_name": data.get("display_name"),
-        "centroid_lat": round(lat, 4),
-        "centroid_lon": round(lon, 4),
+        "centroid_lat": round(lat, 4), "centroid_lon": round(lon, 4),
         "message": "ok",
     })
